@@ -11,7 +11,7 @@
 
 import { startMcpServer } from './mcp-server.js';
 import { startHttpServer, closeHttpServer } from './http-server.js';
-import { startWebSocketServer, closeWebSocketServer } from './websocket.js';
+import { startWebSocketServer, configureWebSocketAuth, closeWebSocketServer } from './websocket.js';
 
 async function main() {
   try {
@@ -20,6 +20,7 @@ async function main() {
 
     // 2. Iniciar HTTP con puerto dinámico, pasándole el puerto WS para inyectarlo en el HTML
     const httpPort = await startHttpServer(wsPort);
+    configureWebSocketAuth(httpPort);
 
     // 3. Graceful shutdown: cuando Claude Code cierra la conexión, stdin se cierra.
     //    Detectamos esto para apagar servidores y que el proceso termine limpiamente.

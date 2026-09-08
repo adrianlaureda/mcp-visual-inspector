@@ -11,11 +11,12 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
   sendFileContent,
+  activateFile,
+  clearActiveFile,
   getSelectedElement,
   waitForSelection,
   highlightElement as wsHighlight,
@@ -24,14 +25,18 @@ import {
 } from './websocket.js';
 import { watchFile, unwatchFile } from './file-watcher.js';
 import { applyCssChange as applyChange } from './css-editor.js';
+import { readAuthorizedFile } from './file-security.js';
 
 // Estado del archivo actualmente inspeccionado
 let currentFilePath: string | null = null;
+export interface McpServerOptions {
+  openBrowser?: boolean;
+}
 
 /**
  * Inicia el servidor MCP. Recibe el puerto HTTP real para abrir el navegador.
  */
-export async function startMcpServer(httpPort: number): Promise<void> {
+export async function startMcpServer(httpPort: number, options: McpServerOptions = {}): Promise<void> {
   const server = new McpServer({
     name: 'visual-inspector',
     version: '1.0.0'
@@ -48,36 +53,33 @@ export async function startMcpServer(httpPort: number): Promise<void> {
     async ({ file_path, watch = true }) => {
       const absolutePath = path.resolve(file_path);
 
-      // Verificar que el archivo existe
-      if (!fs.existsSync(absolutePath)) {
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Error: Archivo no encontrado: ${file_path}`
-          }]
-        };
+      const rootPath = path.dirname(absolutePath);
+      const activated = activateFile(absolutePath, rootPath);
+      if (!activated.success) {
+        return { content: [{ type: 'text' as const, text: `Error: ${activated.message}` }] };
       }
 
-      // Leer contenido
-      const content = fs.readFileSync(absolutePath, 'utf8');
-
-      // Guardar referencia al archivo actual
+      if (currentFilePath && currentFilePath !== absolutePath) unwatchFile(currentFilePath);
       currentFilePath = absolutePath;
 
       // Activar watch si está habilitado
       if (watch) {
         watchFile(absolutePath);
+      } else {
+        unwatchFile(absolutePath);
       }
 
       // Enviar contenido a la web app (si hay clientes conectados)
-      sendFileContent(absolutePath, content);
+      sendFileContent(absolutePath);
 
-      // Abrir Chrome en modo app (ventana limpia sin barra de navegación)
-      const url = `http://localhost:${httpPort}`;
-      spawn('open', ['-na', 'Google Chrome', '--args', `--app=${url}`], {
-        detached: true,
-        stdio: 'ignore'
-      }).unref();
+      const url = `http://127.0.0.1:${httpPort}`;
+      if (options.openBrowser !== false) {
+        // Abrir Chrome en modo app (ventana limpia sin barra de navegación).
+        spawn('open', ['-na', 'Google Chrome', '--args', `--app=${url}`], {
+          detached: true,
+          stdio: 'ignore'
+        }).unref();
+      }
 
       return {
         content: [{
@@ -94,7 +96,7 @@ export async function startMcpServer(httpPort: number): Promise<void> {
     'Obtiene información del elemento actualmente seleccionado en el visualizador.',
     {
       wait: z.boolean().optional().describe('Esperar a que el usuario seleccione un elemento (default: false)'),
-      timeout: z.number().optional().describe('Timeout en ms si wait=true (default: 30000)')
+      timeout: z.number().int().min(1).max(30000).optional().describe('Timeout en ms si wait=true (default: 30000)')
     },
     async ({ wait = false, timeout = 30000 }) => {
       if (!hasConnectedClients()) {
@@ -191,12 +193,20 @@ export async function startMcpServer(httpPort: number): Promise<void> {
         };
       }
 
-      const result = applyChange(currentFilePath, { selector, property, value });
+      let active;
+      try {
+        active = readAuthorizedFile(currentFilePath, path.dirname(currentFilePath));
+      } catch (error) {
+        return { content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : 'archivo no autorizado'}` }] };
+      }
+      const result = applyChange(currentFilePath, { selector, property, value }, {
+        rootPath: active.rootPath,
+        expectedHash: active.hash,
+      });
 
       if (result.success) {
         // Leer el archivo actualizado y enviarlo a la web app
-        const updatedContent = fs.readFileSync(currentFilePath, 'utf8');
-        sendFileContent(currentFilePath, updatedContent);
+        sendFileContent(currentFilePath);
         // Notificar el cambio aplicado (flash visual)
         notifyCssApplied(selector, property, value);
       }
@@ -222,6 +232,7 @@ export async function startMcpServer(httpPort: number): Promise<void> {
         unwatchFile(currentFilePath);
         currentFilePath = null;
       }
+      clearActiveFile();
 
       return {
         content: [{
