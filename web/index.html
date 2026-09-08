@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Visual Inspector</title>
-    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
     <style>
       :root {
         /* Tema oscuro por defecto */
@@ -531,6 +530,7 @@
             <iframe
               class="preview-iframe"
               id="previewIframe"
+              sandbox="allow-scripts"
               style="display: none"
             ></iframe>
           </div>
@@ -760,14 +760,18 @@
     </div>
 
     <script>
-      // Puerto WS inyectado por el servidor HTTP (window.WS_PORT)
-      // Fallback a 7777 para compatibilidad.
-      const WS_PORT = window.WS_PORT || 7777;
+      // El servidor inyecta ambos valores; no hay fallback a otro puerto.
+      const WS_HOST = window.WS_HOST;
+      const WS_PORT = window.WS_PORT;
+      if (WS_HOST !== "127.0.0.1" || !Number.isInteger(WS_PORT) || WS_PORT < 1 || WS_PORT > 65535) {
+        throw new Error("Configuración WS inválida");
+      }
       let ws = null;
       let reconnectInterval = null;
       let currentFilePath = null;
       let selectedElement = null;
       let pendingChanges = {};
+      let bridgeNonce = null;
 
       // Referencias DOM
       const app = document.getElementById("app");
@@ -783,12 +787,48 @@
       const propertiesPanel = document.getElementById("propertiesPanel");
       const inspectorFooter = document.getElementById("inspectorFooter");
 
-      // Inicializar Lucide icons
-      lucide.createIcons();
+      // Iconos locales: no cargar JavaScript remoto en el inspector.
+      const iconPaths = {
+        eye: ["M2 12s3-6 10-6 10 6 10 6-3 6-10 6S2 12 2 12Z", "M12 9v6", "M9 12h6"],
+        smartphone: ["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M12 18h.01"],
+        tablet: ["M5 2h14a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M12 18h.01"],
+        monitor: ["M3 3h18v12H3z", "M8 21h8", "M12 15v6"],
+        "refresh-cw": ["M21 12a9 9 0 0 0-15.3-6.4L3 8", "M3 3v5h5", "M3 12a9 9 0 0 0 15.3 6.4L21 16", "M21 21v-5h-5"],
+        moon: ["M21 12.8A8.5 8.5 0 1 1 11.2 3 6.5 6.5 0 0 0 21 12.8Z"],
+        sun: ["M12 3v2", "M12 19v2", "M3 12h2", "M19 12h2", "m5.6-6.6 1.4-1.4", "m14.9 14.9 1.4 1.4", "m5.6 18.6 1.4 1.4", "m14.9 5.1 1.4-1.4", "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"],
+        "file-code": ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z", "M14 2v6h6", "m10 13-2 2 2 2", "m14 13 2 2-2 2"],
+        copy: ["M9 9h11v11H9z", "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"],
+        "mouse-pointer-click": ["m4 4 7 16 2-7 7-2Z", "m15 15 4 4"],
+        palette: ["M12 3a9 9 0 0 0 0 18h1a2 2 0 0 0 0-4h-1a2 2 0 0 1 0-4h3a6 6 0 0 0 0-12Z", "M7.5 10h.01", "M10 7.5h.01", "M14 7.5h.01"],
+        move: ["M5 9l-3 3 3 3", "M9 5l3-3 3 3", "M15 19l-3 3-3-3", "M19 9l3 3-3 3", "M2 12h20", "M12 2v20"],
+        type: ["M4 7V4h16v3", "M12 4v16", "M8 20h8"],
+        "layout-grid": ["M3 3h7v7H3z", "M14 3h7v7h-7z", "M3 14h7v7H3z", "M14 14h7v7h-7z"],
+        check: ["m5 12 4 4L19 6"],
+      };
+      function renderIcons() {
+        document.querySelectorAll("[data-lucide]").forEach((node) => {
+          const name = node.getAttribute("data-lucide");
+          const paths = iconPaths[name];
+          if (!paths) return;
+          const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          svg.setAttribute("data-lucide", name);
+          svg.setAttribute("width", node.style.width || "16");
+          svg.setAttribute("height", node.style.height || "16");
+          svg.setAttribute("viewBox", "0 0 24 24");
+          svg.setAttribute("fill", "none");
+          svg.setAttribute("stroke", "currentColor");
+          svg.setAttribute("stroke-width", "2");
+          svg.setAttribute("stroke-linecap", "round");
+          svg.setAttribute("stroke-linejoin", "round");
+          paths.forEach((d) => { const pathNode = document.createElementNS("http://www.w3.org/2000/svg", "path"); pathNode.setAttribute("d", d); svg.append(pathNode); });
+          node.replaceWith(svg);
+        });
+      }
+      renderIcons();
 
       // Conectar WebSocket
       function connect() {
-        ws = new WebSocket(`ws://localhost:${WS_PORT}`);
+        ws = new WebSocket(`ws://${WS_HOST}:${WS_PORT}`);
 
         ws.onopen = () => {
           statusDot.classList.add("connected");
@@ -845,10 +885,42 @@
         }
       }
 
+      function makeNonce() {
+        const bytes = new Uint8Array(18);
+        crypto.getRandomValues(bytes);
+        return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      }
+
+      // DOMParser mantiene el HTML del usuario inerte mientras se eliminan ejecutables.
+      function sanitizePreviewHtml(content) {
+        if (typeof content !== "string" || new Blob([content]).size > 1024 * 1024) throw new Error("HTML demasiado grande");
+        const documentNode = new DOMParser().parseFromString(content, "text/html");
+        documentNode.querySelectorAll("script, iframe, frame, object, embed, applet, portal, base, link, meta[http-equiv]").forEach((node) => node.remove());
+        documentNode.querySelectorAll("*").forEach((element) => {
+          Array.from(element.attributes).forEach((attribute) => {
+            const name = attribute.name.toLowerCase();
+            const value = attribute.value;
+            if (name.startsWith("on") || ["srcdoc", "formaction", "action", "poster", "cite"].includes(name)) element.removeAttribute(attribute.name);
+            else if (["src", "href", "xlink:href"].includes(name) && !/^(?:#|data:image\/[a-z+.-]+;|blob:)/i.test(value)) element.removeAttribute(attribute.name);
+            else if (name === "style") element.setAttribute(attribute.name, value.replace(/url\s*\([^)]*\)/gi, "none"));
+          });
+        });
+        documentNode.querySelectorAll("style").forEach((style) => {
+          style.textContent = style.textContent.replace(/@import[^;]*;/gi, "").replace(/url\s*\([^)]*\)/gi, "none");
+        });
+        const csp = documentNode.createElement("meta");
+        csp.setAttribute("http-equiv", "Content-Security-Policy");
+        csp.setAttribute("content", `default-src 'none'; script-src 'nonce-${bridgeNonce}'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'`);
+        documentNode.head.prepend(csp);
+        return documentNode.documentElement.outerHTML;
+      }
+
       // Cargar HTML en el iframe
       function loadHtml(filePath, content, isReload = false) {
+        if (typeof filePath !== "string" || filePath.length > 1024) return;
         currentFilePath = filePath;
         fileName.textContent = filePath.split("/").pop();
+        bridgeNonce = makeNonce();
 
         // Mostrar iframe, ocultar empty state
         emptyState.style.display = "none";
@@ -856,7 +928,7 @@
 
         // Inyectar script de selección en el HTML
         const injectedScript = `
-        <script>
+        <script nonce="${bridgeNonce}">
           // Estado de selección
           let hoveredElement = null;
           let selectedElement = null;
@@ -916,6 +988,7 @@
 
             // Enviar a parent
             window.parent.postMessage({
+              nonce: ${JSON.stringify(bridgeNonce)},
               type: 'element-selected',
               payload: {
                 selector: selector,
@@ -961,8 +1034,10 @@
 
           // Resaltar elemento por selector (comando del servidor)
           window.addEventListener('message', (e) => {
+            if (e.source !== window.parent || !e.data || e.data.nonce !== ${JSON.stringify(bridgeNonce)}) return;
             if (e.data.type === 'highlight') {
-              const el = document.querySelector(e.data.selector);
+              let el;
+              try { el = document.querySelector(e.data.selector); } catch { return; }
               if (el) {
                 selectedElement = el;
                 const rect = el.getBoundingClientRect();
@@ -976,7 +1051,8 @@
             }
 
             if (e.data.type === 'flash') {
-              const el = document.querySelector(e.data.selector);
+              let el;
+              try { el = document.querySelector(e.data.selector); } catch { return; }
               if (el) {
                 el.style.transition = 'box-shadow 0.3s';
                 el.style.boxShadow = '0 0 0 4px rgba(234, 179, 8, 0.8)';
@@ -989,15 +1065,21 @@
         <\/script>
       `;
 
-        // Insertar script antes de </body>
-        let modifiedContent = content;
-        if (content.includes("</body>")) {
-          modifiedContent = content.replace(
+        // Insertar script antes de </body; el contenido ya está sanitizado.
+        let modifiedContent;
+        try {
+          modifiedContent = sanitizePreviewHtml(content);
+        } catch {
+          statusText.textContent = "HTML rechazado";
+          return;
+        }
+        if (modifiedContent.includes("</body>")) {
+          modifiedContent = modifiedContent.replace(
             "</body>",
             injectedScript + "</body>",
           );
         } else {
-          modifiedContent = content + injectedScript;
+          modifiedContent = modifiedContent + injectedScript;
         }
 
         // Escribir al iframe
@@ -1013,6 +1095,8 @@
 
       // Escuchar mensajes del iframe
       window.addEventListener("message", (e) => {
+        if (e.source !== previewIframe.contentWindow || !e.data || e.data.nonce !== bridgeNonce || e.data.type !== "element-selected") return;
+        if (!e.data.payload || typeof e.data.payload.selector !== "string" || e.data.payload.selector.length > 1024 || typeof e.data.payload.tag !== "string" || !e.data.payload.styles || typeof e.data.payload.styles !== "object") return;
         if (e.data.type === "element-selected") {
           selectedElement = e.data.payload;
           showElementProperties(selectedElement);
@@ -1172,6 +1256,7 @@
           {
             type: "highlight",
             selector: selector,
+            nonce: bridgeNonce,
           },
           "*",
         );
@@ -1183,6 +1268,7 @@
           {
             type: "flash",
             selector: selector,
+            nonce: bridgeNonce,
           },
           "*",
         );
@@ -1218,9 +1304,9 @@
         app.dataset.theme = newTheme;
 
         // Cambiar icono
-        const icon = document.querySelector("#themeToggle i");
+        const icon = document.querySelector("#themeToggle svg");
         icon.setAttribute("data-lucide", newTheme === "dark" ? "moon" : "sun");
-        lucide.createIcons();
+        renderIcons();
       };
 
       // Inicializar

@@ -13,8 +13,8 @@ Servidor MCP para inspeccionar y editar HTML visualmente desde Claude Code, con 
 ┌──────────────────────▼──────────────────────────────────────┐
 │  visual-inspector-mcp (Node.js)                             │
 │  - Servidor MCP (stdio)                                     │
-│  - Servidor HTTP (puerto dinámico)                          │
-│  - Servidor WebSocket (puerto dinámico)                     │
+│  - Servidor HTTP loopback (puerto dinámico)                 │
+│  - Servidor WebSocket loopback autenticado                   │
 │  - File watcher para hot reload                             │
 └──────────────────────┬──────────────────────────────────────┘
                        │ WebSocket
@@ -76,13 +76,13 @@ claude
 
 ## Nota importante de build
 
-Si cambias `web/index.html`, recompila para mantener `dist/` sincronizado:
+Si cambias `web/index.html`, recompila para validar TypeScript:
 
 ```bash
 npm run build
 ```
 
-Si `dist/web/index.html` queda desactualizado, puede romperse la conexión WebSocket del visualizador.
+El servidor sirve siempre `web/index.html` desde la raíz del repositorio; no depende de una copia `dist/web`.
 
 ## Uso
 
@@ -125,8 +125,9 @@ visual-inspector-mcp/
 ├── src/
 │   ├── index.ts           # Entry point
 │   ├── mcp-server.ts      # Herramientas MCP
-│   ├── http-server.ts     # Servidor web (puerto dinámico)
-│   ├── websocket.ts       # Comunicación bidireccional (puerto dinámico)
+│   ├── http-server.ts     # Servidor web loopback
+│   ├── websocket.ts       # Comunicación bidireccional autenticada
+│   ├── file-security.ts    # Raíz, límites y escritura atómica
 │   ├── file-watcher.ts    # Hot reload
 │   └── css-editor.ts      # Edición de archivos CSS
 ├── web/
@@ -140,14 +141,21 @@ visual-inspector-mcp/
 
 | Puerto              | Uso                                    |
 | ------------------- | -------------------------------------- |
-| dinámico (`port=0`) | Servidor HTTP (web app)                |
-| dinámico (`port=0`) | WebSocket (comunicación bidireccional) |
+| dinámico loopback (`port=0`) | Servidor HTTP (web app)                |
+| dinámico loopback (`port=0`) | WebSocket (comunicación bidireccional) |
 
-El servidor inyecta `window.WS_PORT` en la web app y el cliente debe usar:
+El servidor inyecta `window.WS_HOST` y `window.WS_PORT` en la web app. No hay
+puerto de reserva:
 
 ```js
-const WS_PORT = window.WS_PORT || 7777;
+const ws = new WebSocket(`ws://${window.WS_HOST}:${window.WS_PORT}`);
 ```
+
+HTTP y WebSocket escuchan únicamente en `127.0.0.1`. El WebSocket exige el
+`Host` de su puerto y el `Origin` exacto del inspector HTTP; no publica CORS.
+Los archivos autorizados por MCP deben ser regulares, sin symlinks ni hardlinks,
+pesar como máximo 1 MiB y estar dentro de la raíz del archivo activo. Las
+escrituras usan SHA-256 como precondición y publicación atómica.
 
 ## Troubleshooting rápido
 
@@ -156,9 +164,9 @@ const WS_PORT = window.WS_PORT || 7777;
 Checklist:
 
 1. Reabrir visualizador con `inspect_html`.
-2. Verificar que el HTML servido contiene `window.WS_PORT`:
-   - `curl -s http://localhost:<puerto_http> | rg "window.WS_PORT"`
-3. Verificar que el cliente usa `window.WS_PORT || 7777` en `web/index.html` y `dist/web/index.html`.
+2. Verificar que el HTML servido contiene `window.WS_HOST` y `window.WS_PORT`:
+   - `curl -s http://127.0.0.1:<puerto_http> | rg "window.WS_(HOST|PORT)"`
+3. Verificar que el cliente usa `window.WS_HOST` y `window.WS_PORT` en `web/index.html`.
 4. Si cambiaste `web/index.html`, ejecutar `npm run build`.
 5. Reiniciar Codex/cliente MCP si persiste.
 
@@ -167,6 +175,7 @@ Checklist:
 - **Gradientes**: Cambiar `background-color` no sobreescribe `linear-gradient`. Usar `background` directamente.
 - **Body/HTML**: La selección del body puede ser difícil si tiene elementos hijos que cubren todo.
 - **CSS externo**: Solo modifica CSS en `<style>` o archivos `.css` locales enlazados.
+- **Preview aislado**: El HTML se muestra en un iframe `sandbox="allow-scripts"`; se eliminan scripts, manejadores de eventos, URLs remotas y `<link>` del contenido de usuario. Los CSS externos se pueden editar, pero no se cargan automáticamente en el preview.
 
 ## Desarrollo
 
